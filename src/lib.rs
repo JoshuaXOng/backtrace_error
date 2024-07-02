@@ -8,7 +8,6 @@ pub fn define_backtrace_error(trait_name: TokenStream) -> TokenStream {
         Some(TokenTree::Ident(trait_name)) => {
             format!("pub trait {trait_name}: std::error::Error {{\n\
                 fn get_backtrace(self) -> Backtrace;\n\
-                fn set_backtrace(self, backtrace_source: impl {trait_name}) -> Self;\n\
             }}").parse().expect("the only thing that could go wrong is a bad trait name")
         }
         _ => panic!("must supply name for the generated trait")
@@ -71,10 +70,6 @@ fn derive_for_struct(trait_name: &str, mut token_stream: IntoIter) -> TokenStrea
     let backtrace_implementation = backtrace_property.map(|backtrace_property| {
         format!("impl {trait_name} for {struct_name} {{\n\
             fn get_backtrace(self) -> Backtrace {{ self.{backtrace_property} }}\n\
-            fn set_backtrace(mut self, backtrace_source: impl {trait_name}) -> Self {{\n\
-                self.{backtrace_property} = backtrace_source.get_backtrace();\n\
-                self\n\
-            }}\n\
         }}")
     }).unwrap_or(String::from(""));
     format!("{display_implementation}\
@@ -242,26 +237,18 @@ fn derive_for_enum(trait_name: &str, mut token_stream: IntoIter) -> TokenStream 
 
     let backtrace_implementation = variants_information.iter().map(|info| {
             let property_name = info.backtrace_property.clone()?;
-            Some((
-                generate_arms(info.name.clone(), property_name.clone(), "", "", ""),
-                generate_arms(info.name.clone(), property_name, "ref mut ", "*", " = backtrace_source.get_backtrace()")
-            ))
+            Some(
+                generate_arms(info.name.clone(), property_name, "", "", ""),
+            )
         })
-        .collect::<Option<Vec<(_, _)>>>()
-        .map(|backtrace_arms| {
-            let (getter_arms, setter_arms): (Vec<_>, Vec<_>) = backtrace_arms.into_iter().unzip();
-            let (getter_arms, setter_arms) = (getter_arms.join(",\n"), setter_arms.join(",\n"));
+        .collect::<Option<Vec<_>>>()
+        .map(|getter_arms| {
+            let getter_arms = getter_arms.join(",\n");
             format!("impl {trait_name} for {enum_name} {{\n\
                 fn get_backtrace(self) -> Backtrace {{\n\
                     match self {{\n\
                         {getter_arms}\n\
                     }}\n\
-                }}\n\
-                fn set_backtrace(mut self, backtrace_source: impl {trait_name}) -> Self {{\n\
-                    match self {{\n\
-                        {setter_arms}\n\
-                    }};\n\
-                    self\n\
                 }}\n\
             }}")
         })
