@@ -2,6 +2,9 @@
 name = "backtrait_error"
 version = "0.1.0"
 edition = "2021"
+description = "Errors with backtraces."
+repository = "https://github.com/JoshuaXOng/backtrace_error"
+license-file = "LICENSE"
 
 [lib]
 proc-macro = true
