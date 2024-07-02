@@ -3,5 +3,5 @@
 version = 3
 
 [[package]]
-name = "backtrace_error"
+name = "backtrait_error"
 version = "0.1.0"
