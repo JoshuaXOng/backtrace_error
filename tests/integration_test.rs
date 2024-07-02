@@ -1,10 +1,23 @@
 use std::backtrace::Backtrace;
-use backtrace_error::{define_backtrace_error, BacktraceError};
+use backtrace_error::{backtrace_derive, define_backtrace_error, BacktraceError};
 
 #[test]
 fn test_crate() {
-    define_backtrace_error!(BacktraceError);
+    define_backtrace_error!(ErrorWithBacktrace);
 
+    #[derive(Debug, BacktraceError)]
+    #[backtrace_derive(ErrorWithBacktrace)]
+    struct StructError_ {
+        #[display] 
+        message: String,
+        #[backtrace] 
+        backtrace: Backtrace
+    }
+    let e = StructError_ { message: String::from("Sigh"), backtrace: Backtrace::capture() };
+    println!("{e}");
+    println!("{e:#?}");
+
+    #[backtrace_derive(ErrorWithBacktrace)]
     #[derive(Debug, BacktraceError)]
     struct StructError {
         #[display] 
@@ -16,12 +29,14 @@ fn test_crate() {
     println!("{e}");
     println!("{e:#?}");
 
+    #[backtrace_derive(ErrorWithBacktrace)]
     #[derive(Debug, BacktraceError)]
     struct UnitError(#[display] String, #[backtrace] Backtrace, #[allow(dead_code)] Result<(), ()>);
     let e = UnitError(String::from("at all"), Backtrace::capture(), Ok(()));
     println!("{e}");
     println!("{e:#?}");
 
+    #[backtrace_derive(ErrorWithBacktrace)]
     #[derive(Debug, BacktraceError)]
     enum EnumError {
         ABitScuffed(#[display] String, #[backtrace] Backtrace),
@@ -44,6 +59,7 @@ fn test_crate() {
     println!("{e}");
     println!("{e:#?}");
 
+    #[backtrace_derive(ErrorWithBacktrace)]
     #[derive(Debug, BacktraceError)]
     struct NoAttributeError(String, #[backtrace] Backtrace, #[allow(dead_code)] Result<(), ()>);
     impl std::fmt::Display for NoAttributeError {

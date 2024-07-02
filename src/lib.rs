@@ -2,43 +2,53 @@ extern crate proc_macro;
 use proc_macro::{token_stream::IntoIter, Group, TokenStream, TokenTree};
 
 #[proc_macro]
-pub fn define_backtrace_error(token_stream: TokenStream) -> TokenStream {
-    let trait_name = token_stream.into_iter().next();
+pub fn define_backtrace_error(trait_name: TokenStream) -> TokenStream {
+    let trait_name = trait_name.into_iter().next();
     match trait_name {
         Some(TokenTree::Ident(trait_name)) => {
             format!("pub trait {trait_name}: std::error::Error {{\n\
                 fn get_backtrace(self) -> Backtrace;\n\
                 fn set_backtrace(self, backtrace_source: impl {trait_name}) -> Self;\n\
-            }}").parse().expect("failed to parse for unpredicted reason")
+            }}").parse().expect("the only thing that could go wrong is a bad trait name")
         }
         _ => panic!("must supply name for the generated trait")
     }
 }
 
 #[proc_macro_derive(BacktraceError, attributes(display, backtrace))]
-pub fn derive_backtrace_error_implementation(token_stream: TokenStream) -> TokenStream {
-    let mut token_stream = token_stream.into_iter();
-    let rust_keyword = token_stream.next().expect("not applied to struct or enum");
-    let name = format!("{}", token_stream.next().expect("struct/enum name needed"));
-    let (display_implementation, backtrace_implementation) = match rust_keyword {
-        TokenTree::Ident(rust_keyword) => {
-            match rust_keyword.span().source_text().as_ref().map(String::as_str) {
-                Some("struct") => derive_for_struct(name.as_str(), token_stream),
-                Some("enum") => derive_for_enum(name.as_str(), token_stream),
-                _ => panic!("encountered a bug in matching literal")
-            }
-        },
-        _ => panic!("only struct and enum are supported")
-    };
-
-    let display_implementation = display_implementation.map(|implementation| implementation + "\n").unwrap_or(String::from(""));
-    let backtrace_implementation = backtrace_implementation.unwrap_or(String::from(""));
-    format!("{display_implementation}
-        impl std::error::Error for {name} {{}}\n\
-    {backtrace_implementation}").parse().expect("encountered bug when parsing")
+pub fn permit_attributes(_: TokenStream) -> TokenStream {
+    "".parse().expect("empty string failed to parse")
 }
 
-fn derive_for_struct(struct_name: &str, mut token_stream: IntoIter) -> (Option<String>, Option<String>) {
+#[proc_macro_attribute]
+pub fn backtrace_derive(attributes: TokenStream, mut struct_or_enum: TokenStream) -> TokenStream {
+    let mut struct_or_enum_ = struct_or_enum.clone().into_iter();
+
+    let trait_name = attributes.into_iter().next()
+        .expect("need to supply name of the trait")
+        .span().source_text()
+        .expect("source text cannot be empty");
+    let trait_name = trait_name.as_str();
+
+    let trait_implementations = loop {
+        match struct_or_enum_.next().and_then(|token| token.span().source_text()) {
+            Some(token_text) if token_text.as_str() == "struct" => {
+                break derive_for_struct(trait_name, struct_or_enum_);
+            },
+            Some(token_text) if token_text.as_str() == "enum" => {
+                break derive_for_enum(trait_name, struct_or_enum_);
+            },
+            None => panic!("failed to find enum or struct keyword"),
+            _ => {}
+        };
+    };
+    
+    struct_or_enum.extend(trait_implementations);
+    struct_or_enum 
+}
+
+fn derive_for_struct(trait_name: &str, mut token_stream: IntoIter) -> TokenStream {
+    let struct_name = token_stream.next().expect("struct name should follow struct keyword");
     let struct_body = token_stream.next();
     let (display_property, backtrace_property) = match struct_body {
         Some(TokenTree::Group(struct_body)) => {
@@ -51,24 +61,25 @@ fn derive_for_struct(struct_name: &str, mut token_stream: IntoIter) -> (Option<S
         _ => panic!("struct must have body"),
     };
 
-    (
-        display_property.map(|display_property| {
-            format!("impl std::fmt::Display for {struct_name} {{\n\
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n\
-                    write!(f, \"{{}}\", self.{display_property})\n\
-                }}\n\
-            }}")
-        }),
-        backtrace_property.map(|backtrace_property| {
-            format!("impl BacktraceError for {struct_name} {{\n\
-                fn get_backtrace(self) -> Backtrace {{ self.{backtrace_property} }}\n\
-                fn set_backtrace(mut self, backtrace_source: impl BacktraceError) -> Self {{\n\
-                    self.{backtrace_property} = backtrace_source.get_backtrace();\n\
-                    self\n\
-                }}\n\
-            }}")
-        })
-    )
+    let display_implementation = display_property.map(|display_property| {
+        format!("impl std::fmt::Display for {struct_name} {{\n\
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n\
+                write!(f, \"{{}}\", self.{display_property})\n\
+            }}\n\
+        }}\n")
+    }).unwrap_or(String::from(""));
+    let backtrace_implementation = backtrace_property.map(|backtrace_property| {
+        format!("impl {trait_name} for {struct_name} {{\n\
+            fn get_backtrace(self) -> Backtrace {{ self.{backtrace_property} }}\n\
+            fn set_backtrace(mut self, backtrace_source: impl {trait_name}) -> Self {{\n\
+                self.{backtrace_property} = backtrace_source.get_backtrace();\n\
+                self\n\
+            }}\n\
+        }}")
+    }).unwrap_or(String::from(""));
+    format!("{display_implementation}\
+        impl std::error::Error for {struct_name} {{}}\n\
+    {backtrace_implementation}").parse().expect("failed to parse generated struct code")
 }
 
 fn get_non_unit_struct_properties(struct_body: Group) -> (Option<String>, Option<String>) {
@@ -157,7 +168,7 @@ fn get_unit_struct_properties(struct_body: Group) -> (Option<String>, Option<Str
     )
 } 
 
-fn derive_for_enum(enum_name: &str, mut token_stream: IntoIter) -> (Option<String>, Option<String>) {
+fn derive_for_enum(trait_name: &str, mut token_stream: IntoIter) -> TokenStream {
     struct VariantInformation {
         name: String,
         display_property: Option<String>, 
@@ -165,6 +176,7 @@ fn derive_for_enum(enum_name: &str, mut token_stream: IntoIter) -> (Option<Strin
     }
     let mut variants_information = vec![];
 
+    let enum_name = token_stream.next().expect("enum name should follow enum keyword");
     let enum_body = token_stream.next();
     match enum_body {
         Some(TokenTree::Group(enum_body)) => {
@@ -216,13 +228,17 @@ fn derive_for_enum(enum_name: &str, mut token_stream: IntoIter) -> (Option<Strin
             Some(generate_arms(info.name.clone(), property_name, "", "", ""))
         })
         .collect::<Option<Vec<_>>>()
-        .map(|display_arms| format!("impl std::fmt::Display for {enum_name} {{\n\
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n\
-                write!(f, \"{{}}\", match self {{\n\
-                    {}\n\
-                }})\n\
-            }}\n\
-        }}", display_arms.join(",\n")));
+        .map(|display_arms| {
+            let display_arms = display_arms.join(",\n");
+            format!("impl std::fmt::Display for {enum_name} {{\n\
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n\
+                    write!(f, \"{{}}\", match self {{\n\
+                        {display_arms}\n\
+                    }})\n\
+                }}\n\
+            }}\n")
+        })
+        .unwrap_or(String::from(""));
 
     let backtrace_implementation = variants_information.iter().map(|info| {
             let property_name = info.backtrace_property.clone()?;
@@ -234,23 +250,24 @@ fn derive_for_enum(enum_name: &str, mut token_stream: IntoIter) -> (Option<Strin
         .collect::<Option<Vec<(_, _)>>>()
         .map(|backtrace_arms| {
             let (getter_arms, setter_arms): (Vec<_>, Vec<_>) = backtrace_arms.into_iter().unzip();
-            format!("impl BacktraceError for {enum_name} {{\n\
+            let (getter_arms, setter_arms) = (getter_arms.join(",\n"), setter_arms.join(",\n"));
+            format!("impl {trait_name} for {enum_name} {{\n\
                 fn get_backtrace(self) -> Backtrace {{\n\
                     match self {{\n\
-                        {}\n\
+                        {getter_arms}\n\
                     }}\n\
                 }}\n\
-                fn set_backtrace(mut self, backtrace_source: impl BacktraceError) -> Self {{\n\
+                fn set_backtrace(mut self, backtrace_source: impl {trait_name}) -> Self {{\n\
                     match self {{\n\
-                        {}\n\
+                        {setter_arms}\n\
                     }};\n\
                     self\n\
                 }}\n\
-            }}", getter_arms.join(",\n"), setter_arms.join(",\n"))
-        });
+            }}")
+        })
+        .unwrap_or(String::from(""));
 
-    (
-        display_implementation,
-        backtrace_implementation
-    )
+    format!("{display_implementation}\
+        impl std::error::Error for {enum_name} {{}}\n\
+    {backtrace_implementation}").parse().expect("failed to parse generated enum code")
 }
