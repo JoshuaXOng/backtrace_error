@@ -1,5 +1,5 @@
 use std::backtrace::Backtrace;
-use backtrace_error::{backtrace_derive, define_backtrace_error, BacktraceError};
+use backtrait_error::{backtrace_derive, define_backtrace_error, BacktraceError};
 
 #[test]
 fn test_crate() {
