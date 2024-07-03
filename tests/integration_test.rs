@@ -6,6 +6,19 @@ fn test_crate() {
     define_backtrace_error!(ErrorWithBacktrace);
     define_backtrace_source!(BacktraceSource, ErrorWithBacktrace);
 
+    #[derive(Debug)]
+    struct Hmm(Box<dyn ErrorWithBacktrace>);
+    impl std::fmt::Display for Hmm {
+        fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            todo!()
+        }
+    }
+    impl std::error::Error for Hmm {
+        fn cause(&self) -> Option<&dyn std::error::Error> {
+            Some(self.0.get_error())
+        }
+    }
+
     #[derive(Debug, BacktraceError)]
     #[backtrace_derive(ErrorWithBacktrace)]
     struct AnError(#[display] String, #[backtrace] BacktraceSource);

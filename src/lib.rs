@@ -9,6 +9,7 @@ pub fn define_backtrace_error(trait_name: TokenStream) -> TokenStream {
             format!("pub trait {trait_name}: std::error::Error {{\n\
                 fn get_backtrace_source(&self) -> Option<&Box<dyn {trait_name}>>;\n\
                 fn get_backtrace(&self) -> &Backtrace;\n\
+                fn get_error(&self) -> &dyn std::error::Error;\n\
             }}").parse().expect("the only thing that could go wrong is a bad trait name")
         }
         _ => panic!("must supply name for the generated trait")
@@ -111,18 +112,27 @@ fn derive_for_struct(trait_name: &str, mut token_stream: IntoIter) -> TokenStrea
         }}\n")
     }).unwrap_or(String::from(""));
     let backtrace_implementation = backtrace_property.map(|backtrace_property| {
-        format!("impl {trait_name} for {struct_name} {{\n\
-            fn get_backtrace_source(&self) -> Option<&Box<dyn {trait_name}>> {{\n\
-                self.{backtrace_property}.get_backtrace_source()\n\
+        format!("\
+            impl std::error::Error for {struct_name} {{\n\
+                fn cause(&self) -> Option<&dyn std::error::Error> {{\n\
+                    self.{backtrace_property}.get_backtrace_source().map(|error_source| error_source.get_error())\n\
+                }}\n\
             }}\n\
-            fn get_backtrace(&self) -> &Backtrace {{\n\
-                &self.{backtrace_property}.get_backtrace()\n\
-            }}\n\
-        }}")
+            impl {trait_name} for {struct_name} {{\n\
+                fn get_backtrace_source(&self) -> Option<&Box<dyn {trait_name}>> {{\n\
+                    self.{backtrace_property}.get_backtrace_source()\n\
+                }}\n\
+                fn get_backtrace(&self) -> &Backtrace {{\n\
+                    &self.{backtrace_property}.get_backtrace()\n\
+                }}\n\
+                fn get_error(&self) -> &dyn std::error::Error {{\n\
+                    self\n\
+                }}\n\
+            }}\
+        ")
     }).unwrap_or(String::from(""));
-    format!("{display_implementation}\
-        impl std::error::Error for {struct_name} {{}}\n\
-    {backtrace_implementation}").parse().expect("failed to parse generated struct code")
+    format!("{display_implementation}{backtrace_implementation}").parse()
+        .expect("failed to parse generated struct code")
 }
 
 fn get_non_unit_struct_properties(struct_body: Group) -> (Option<String>, Option<String>) {
@@ -283,41 +293,59 @@ fn derive_for_enum(trait_name: &str, mut token_stream: IntoIter) -> TokenStream 
         })
         .unwrap_or(String::from(""));
 
-    let backtrace_implementation = variants_information.iter().map(|info| {
+    let backtrace_implementation = variants_information.iter()
+        .try_fold((String::new(), String::new(), String::new()), |mut accumulator, info| {
             let property_name = info.backtrace_property.clone()?;
-
-            Some((
-                generate_arm(
-                    info.name.clone(), property_name.clone(), 
-                    "", "", ".get_backtrace_source()"
-                ),
-                generate_arm(
-                    info.name.clone(), property_name, 
-                    "", "&", ".get_backtrace()"
-                ),
-            ))
+            
+            accumulator.0 += &generate_arm(
+                info.name.clone(), property_name.clone(), 
+                "", "", ".get_backtrace_source().map(|error_source| error_source.get_error())"
+                
+            );
+            accumulator.0 += ",\n";
+            accumulator.1 += &generate_arm(
+                info.name.clone(), property_name.clone(), 
+                "", "", ".get_backtrace_source()"
+            );
+            accumulator.1 += ",\n";
+            accumulator.2 += &generate_arm(
+                info.name.clone(), property_name, 
+                "", "&", ".get_backtrace()"
+            );
+            accumulator.2 += ",\n";
+            Some(accumulator)
         })
-        .collect::<Option<Vec<(_, _)>>>()
-        .map(|match_arms| {
-            let (source_arms, backtrace_arms): (Vec<_>, Vec<_>) = match_arms.into_iter().unzip();
-            let (source_arms, backtrace_arms) = (source_arms.join(",\n"), backtrace_arms.join(",\n"));
-            format!("impl {trait_name} for {enum_name} {{\n\
-                fn get_backtrace_source(&self) -> Option<&Box<dyn {trait_name}>> {{\n\
-                    match self {{\n\
-                        {source_arms}\n\
+        .map(|(mut cause_arms, mut source_arms, mut backtrace_arms)| {
+            cause_arms.pop();
+            source_arms.pop();
+            backtrace_arms.pop();
+            format!("\
+                impl std::error::Error for {enum_name} {{\n\
+                    fn cause(&self) -> Option<&dyn std::error::Error> {{\n\
+                        match self {{\n\
+                            {cause_arms}\n\
+                        }}\n\
                     }}\n\
                 }}\n\
-                fn get_backtrace(&self) -> &Backtrace {{\n\
-                    match self {{\n\
-                        {backtrace_arms}\n\
+                impl {trait_name} for {enum_name} {{\n\
+                    fn get_backtrace_source(&self) -> Option<&Box<dyn {trait_name}>> {{\n\
+                        match self {{\n\
+                            {source_arms}\n\
+                        }}\n\
                     }}\n\
-                }}\n\
-            }}")
-                //"".join(",\n");
+                    fn get_backtrace(&self) -> &Backtrace {{\n\
+                        match self {{\n\
+                            {backtrace_arms}\n\
+                        }}\n\
+                    }}\n\
+                    fn get_error(&self) -> &dyn std::error::Error {{\n\
+                        self\n\
+                    }}\n\
+                }}\
+            ")
         })
         .unwrap_or(String::from(""));
 
-    format!("{display_implementation}\
-        impl std::error::Error for {enum_name} {{}}\n\
-    {backtrace_implementation}").parse().expect("failed to parse generated enum code")
+    format!("{display_implementation}{backtrace_implementation}").parse()
+        .expect("failed to parse generated enum code")
 }
