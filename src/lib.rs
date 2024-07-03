@@ -7,14 +7,57 @@ pub fn define_backtrace_error(trait_name: TokenStream) -> TokenStream {
     match trait_name {
         Some(TokenTree::Ident(trait_name)) => {
             format!("pub trait {trait_name}: std::error::Error {{\n\
-                fn get_backtrace(self) -> Backtrace;\n\
+                fn get_backtrace_source(&self) -> Option<&Box<dyn {trait_name}>>;\n\
+                fn get_backtrace(&self) -> &Backtrace;\n\
             }}").parse().expect("the only thing that could go wrong is a bad trait name")
         }
         _ => panic!("must supply name for the generated trait")
     }
 }
 
-#[proc_macro_derive(BacktraceError, attributes(display, backtrace))]
+#[proc_macro]
+pub fn define_backtrace_source(arguments: TokenStream) -> TokenStream {
+    let mut arguments = arguments.into_iter();
+    let enum_name = arguments.next().expect("must supply name for the generated enum");
+    arguments.next();
+    let trait_name = arguments.next();
+    match trait_name {
+        Some(TokenTree::Ident(trait_name)) => {
+            format!("\
+                #[derive(Debug)]\n\
+                enum {enum_name} {{\n\
+                    Own(Backtrace, Option<Box<dyn std::error::Error>>),\n\
+                    Other(Box<dyn {trait_name}>)\n\
+                }}\n\
+                impl {enum_name} {{\n\
+                    fn new(underlying_error: Option<Box<dyn std::error::Error>>) -> Self {{\n\
+                        Self::Own(Backtrace::capture(), underlying_error)\n\
+                    }}\n\
+                    fn from(underlying_error: Box<dyn {trait_name}>) -> Self {{\n\
+                        Self::Other(underlying_error)\n\
+                    }}\n\
+                    fn get_backtrace_source(&self) -> Option<&Box<dyn {trait_name}>> {{\n\
+                        match self {{\n\
+                            {enum_name}::Own(_, _) => None,\n\
+                            {enum_name}::Other(backtrace_error) => Some(&backtrace_error),\n\
+                        }}\n\
+                    }}\n\
+                    fn get_backtrace(&self) -> &Backtrace {{\n\
+                        match self {{\n\
+                            {enum_name}::Own(backtrace, _) => &backtrace,\n\
+                            {enum_name}::Other(backtrace_error) => {{\n\
+                                backtrace_error.get_backtrace()\n\
+                            }}\n\
+                        }}\n\
+                    }}\n\
+                }}\
+            ").parse().expect("the only thing that could go wrong is a bad trait name")
+        }
+        _ => panic!("must supply name of the backtrace error trait")
+    }
+}
+
+#[proc_macro_derive(BacktraceError, attributes(display, backtrace, backtrace_source))]
 pub fn permit_attributes(_: TokenStream) -> TokenStream {
     "".parse().expect("empty string failed to parse")
 }
@@ -69,7 +112,12 @@ fn derive_for_struct(trait_name: &str, mut token_stream: IntoIter) -> TokenStrea
     }).unwrap_or(String::from(""));
     let backtrace_implementation = backtrace_property.map(|backtrace_property| {
         format!("impl {trait_name} for {struct_name} {{\n\
-            fn get_backtrace(self) -> Backtrace {{ self.{backtrace_property} }}\n\
+            fn get_backtrace_source(&self) -> Option<&Box<dyn {trait_name}>> {{\n\
+                self.{backtrace_property}.get_backtrace_source()\n\
+            }}\n\
+            fn get_backtrace(&self) -> &Backtrace {{\n\
+                &self.{backtrace_property}.get_backtrace()\n\
+            }}\n\
         }}")
     }).unwrap_or(String::from(""));
     format!("{display_implementation}\
@@ -209,7 +257,7 @@ fn derive_for_enum(trait_name: &str, mut token_stream: IntoIter) -> TokenStream 
         panic!("backtrace attribute must be applied to none of the variant or all");
     }
 
-    let generate_arms = |variant_name, property_name: String, lhs_prefix, rhs_prefix, rhs_suffix| {
+    let generate_arm = |variant_name, property_name: String, lhs_prefix, rhs_prefix, rhs_suffix| {
         if let Ok(property_index) = property_name.parse::<usize>() {
             let pattern_padding = "_, ".repeat(property_index);
             format!("{enum_name}::{variant_name}({pattern_padding}{lhs_prefix}property_name, ..) => {rhs_prefix}property_name{rhs_suffix}")
@@ -220,7 +268,7 @@ fn derive_for_enum(trait_name: &str, mut token_stream: IntoIter) -> TokenStream 
 
     let display_implementation = variants_information.iter().map(|info| {
             let property_name = info.display_property.clone()?;
-            Some(generate_arms(info.name.clone(), property_name, "", "", ""))
+            Some(generate_arm(info.name.clone(), property_name, "", "", ""))
         })
         .collect::<Option<Vec<_>>>()
         .map(|display_arms| {
@@ -237,20 +285,35 @@ fn derive_for_enum(trait_name: &str, mut token_stream: IntoIter) -> TokenStream 
 
     let backtrace_implementation = variants_information.iter().map(|info| {
             let property_name = info.backtrace_property.clone()?;
-            Some(
-                generate_arms(info.name.clone(), property_name, "", "", ""),
-            )
+
+            Some((
+                generate_arm(
+                    info.name.clone(), property_name.clone(), 
+                    "", "", ".get_backtrace_source()"
+                ),
+                generate_arm(
+                    info.name.clone(), property_name, 
+                    "", "&", ".get_backtrace()"
+                ),
+            ))
         })
-        .collect::<Option<Vec<_>>>()
-        .map(|getter_arms| {
-            let getter_arms = getter_arms.join(",\n");
+        .collect::<Option<Vec<(_, _)>>>()
+        .map(|match_arms| {
+            let (source_arms, backtrace_arms): (Vec<_>, Vec<_>) = match_arms.into_iter().unzip();
+            let (source_arms, backtrace_arms) = (source_arms.join(",\n"), backtrace_arms.join(",\n"));
             format!("impl {trait_name} for {enum_name} {{\n\
-                fn get_backtrace(self) -> Backtrace {{\n\
+                fn get_backtrace_source(&self) -> Option<&Box<dyn {trait_name}>> {{\n\
                     match self {{\n\
-                        {getter_arms}\n\
+                        {source_arms}\n\
+                    }}\n\
+                }}\n\
+                fn get_backtrace(&self) -> &Backtrace {{\n\
+                    match self {{\n\
+                        {backtrace_arms}\n\
                     }}\n\
                 }}\n\
             }}")
+                //"".join(",\n");
         })
         .unwrap_or(String::from(""));
 
